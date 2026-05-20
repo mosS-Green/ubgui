@@ -1,0 +1,38 @@
+<resources>
+    <string name="app_name">Plain-UB Dashboard</string>
+    <string name="title_dashboard">Plain-UB Control Center</string>
+    <string name="subtitle_dashboard">Termux User-Bot GUI Interface</string>
+    
+    <!-- Status Labels -->
+    <string name="status_label">Bot Status:</string>
+    <string name="status_running">RUNNING</string>
+    <string name="status_stopped">STOPPED</string>
+    <string name="status_uninstalled">NOT INSTALLED</string>
+    <string name="mode_label">Client Mode:</string>
+    <string name="mode_single">Single Client</string>
+    <string name="mode_dual">Dual Client</string>
+    
+    <!-- Buttons -->
+    <string name="btn_start">Start Bot</string>
+    <string name="btn_stop">Stop Bot</string>
+    <string name="btn_check">Check Status</string>
+    <string name="btn_save_config">Save Config</string>
+    <string name="btn_run_setup">Run Setup in Termux</string>
+    <string name="btn_refresh_logs">Refresh Logs</string>
+    <string name="btn_clear_logs">Clear Console</string>
+    
+    <!-- Configuration -->
+    <string name="config_header">Configuration Settings</string>
+    <string name="hint_api_id">API ID (e.g. 1234567)</string>
+    <string name="hint_api_hash">API HASH (32 character hex)</string>
+    <string name="hint_bot_token">BOT_TOKEN (for dual mode / bot client)</string>
+    <string name="hint_session_string">SESSION_STRING (Pyrogram String Session)</string>
+    <string name="hint_extra_repo">EXTRA_MODULES_REPO (Optional)</string>
+    
+    <!-- Setup Steps -->
+    <string name="setup_header">Termux Installation Helper</string>
+    <string name="setup_step1_title">1. Configure Termux Permissions</string>
+    <string name="setup_step1_desc">Ensure your Termux properties allows external apps. In Termux, run:\n\necho "allow-external-apps = true" >> ~/.termux/termux.properties\ntermux-reload-settings\n\nAlso grant "Run commands in Termux" permission in Android App Info -> Advanced Permissions.</string>
+    <string name="setup_step2_title">2. Automate Environment Build</string>
+    <string name="setup_step2_desc">This step automatically downloads Python, Git, and system libraries inside Termux, clones the plain-ub repository, generates the config.env, and installs the required core package (with dual mode support if selected).</string>
+</resources>
