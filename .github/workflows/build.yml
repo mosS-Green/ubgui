@@ -16,23 +16,31 @@ jobs:
       - name: Checkout Codebase
         uses: actions/checkout@v4
 
-      - name: Set up Java 17 Development Kit (JDK)
+      - name: Set up Java 17 (Temurin)
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
           cache: 'gradle'
 
-      - name: Configure Gradle Environment
-        uses: gradle/actions/setup-gradle@v3
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Download Gradle Wrapper JAR
+        run: |
+          mkdir -p gradle/wrapper
+          curl -sL https://raw.githubusercontent.com/gradle/gradle/v8.5.0/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
 
       - name: Compile and Assemble Debug APK
-        run: gradle assembleDebug
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: Upload Compiled Debug APK
+      - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: plain-ub-gui-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: plain-ub-gui-debug
+          path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14

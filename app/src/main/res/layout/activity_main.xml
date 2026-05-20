@@ -12,8 +12,7 @@
     <androidx.core.widget.NestedScrollView
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:fillViewport="true"
-        app:layout_behavior="@string/appbar_scrolling_view_behavior">
+        android:fillViewport="true">
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -207,7 +206,7 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Choose Bot Mode:"
+                        android:text="@string/choose_mode"
                         android:textColor="@color/text_secondary"
                         android:textSize="14sp"
                         android:layout_marginBottom="8dp" />
@@ -441,7 +440,7 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Termux Log Console"
+                        android:text="@string/terminal_header"
                         android:textColor="@color/text_primary"
                         android:textSize="18sp"
                         android:textStyle="bold"
@@ -451,19 +450,22 @@
                     <ScrollView
                         android:id="@+id/sv_terminal"
                         android:layout_width="match_parent"
-                        android:layout_height="250dp"
+                        android:layout_height="280dp"
                         android:background="@color/terminal_bg"
                         android:padding="12dp"
-                        android:layout_marginBottom="16dp">
+                        android:layout_marginBottom="16dp"
+                        android:nestedScrollingEnabled="true"
+                        android:isScrollContainer="true">
 
                         <TextView
                             android:id="@+id/tv_terminal_output"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:text="Console ready. Log entries will appear here..."
+                            android:text="@string/terminal_placeholder"
                             android:textColor="@color/terminal_text"
                             android:textSize="12sp"
-                            android:fontFamily="monospace" />
+                            android:fontFamily="monospace"
+                            android:textIsSelectable="true" />
                     </ScrollView>
 
                     <!-- Terminal Actions -->

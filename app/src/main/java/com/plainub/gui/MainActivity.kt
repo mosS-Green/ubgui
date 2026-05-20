@@ -10,7 +10,6 @@ import android.content.res.ColorStateList
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
-import android.text.method.ScrollingMovementMethod
 import android.util.Log
 import android.view.View
 import android.widget.Toast
@@ -20,486 +19,460 @@ import com.plainub.gui.databinding.ActivityMainBinding
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicInteger
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
-    private lateinit var sharedPreferences: SharedPreferences
+    private lateinit var prefs: SharedPreferences
     private var isDualMode = false
+
+    // Atomic counter to generate unique request codes per invocation
+    private val requestCounter = AtomicInteger(0)
 
     companion object {
         private const val TAG = "PlainUBGui"
         private const val PREFS_NAME = "PlainUBPrefs"
         private const val ACTION_TERMUX_RESULT = "com.plainub.gui.TERMUX_RESULT"
-        
-        // Termux RUN_COMMAND Constants
+
+        // Termux RUN_COMMAND intent constants
         private const val TERMUX_PACKAGE = "com.termux"
         private const val TERMUX_SERVICE = "com.termux.app.RunCommandService"
         private const val ACTION_RUN_COMMAND = "com.termux.RUN_COMMAND"
-        
         private const val EXTRA_COMMAND_PATH = "com.termux.RUN_COMMAND_PATH"
         private const val EXTRA_COMMAND_ARGUMENTS = "com.termux.RUN_COMMAND_ARGUMENTS"
         private const val EXTRA_COMMAND_WORKDIR = "com.termux.RUN_COMMAND_WORKDIR"
         private const val EXTRA_COMMAND_BACKGROUND = "com.termux.RUN_COMMAND_BACKGROUND"
         private const val EXTRA_PENDING_INTENT = "com.termux.RUN_COMMAND_PENDING_INTENT"
 
-        // Request codes for different Termux actions
-        private const val REQ_SETUP = 1001
-        private const val REQ_START = 1002
-        private const val REQ_STOP = 1003
-        private const val REQ_STATUS = 1004
-        private const val REQ_LOGS = 1005
+        // Logical tags sent via the intent extra to identify what command was run
+        private const val CMD_SETUP = "setup"
+        private const val CMD_START = "start"
+        private const val CMD_STOP = "stop"
+        private const val CMD_STATUS = "status"
+        private const val CMD_LOGS = "logs"
     }
 
-    // Dynamic BroadcastReceiver to receive Termux execution results
+    // ──────────────────────────────────────────────
+    // BroadcastReceiver for Termux results
+    // ──────────────────────────────────────────────
     private val termuxReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent == null || intent.action != ACTION_TERMUX_RESULT) return
+            if (intent?.action != ACTION_TERMUX_RESULT) return
 
+            val cmdTag = intent.getStringExtra("cmd_tag") ?: return
             val resultBundle = intent.getBundleExtra("result")
-            val requestCode = intent.getIntExtra("request_code", 0)
-            
-            if (resultBundle != null) {
-                val stdout = resultBundle.getString("stdout") ?: ""
-                val stderr = resultBundle.getString("stderr") ?: ""
-                val exitCode = resultBundle.getInt("exit_code", -999)
-                val errCode = resultBundle.getString("err") ?: ""
 
+            if (resultBundle == null) {
                 runOnUiThread {
-                    handleTermuxResult(requestCode, stdout, stderr, exitCode, errCode)
+                    appendLog("Error: No result bundle from Termux. Check permissions.", isError = true)
                 }
-            } else {
-                appendLog("System Error: Received null result bundle from Termux.", isError = true)
+                return
+            }
+
+            val stdout = resultBundle.getString("stdout", "") ?: ""
+            val stderr = resultBundle.getString("stderr", "") ?: ""
+            val exitCode = resultBundle.getInt("exit_code", -1)
+            val internalErr = resultBundle.getString("err", "") ?: ""
+
+            runOnUiThread {
+                handleResult(cmdTag, stdout.trim(), stderr.trim(), exitCode, internalErr.trim())
             }
         }
     }
 
+    // ──────────────────────────────────────────────
+    // Lifecycle
+    // ──────────────────────────────────────────────
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        sharedPreferences = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-        setupUI()
+        wireUI()
         loadSavedConfig()
-        registerTermuxReceiver()
-        
-        // Auto-check status on startup
+        registerResultReceiver()
         checkBotStatus()
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        try {
-            unregisterReceiver(termuxReceiver)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error unregistering receiver", e)
-        }
+        try { unregisterReceiver(termuxReceiver) } catch (_: Exception) {}
     }
 
-    private fun registerTermuxReceiver() {
+    private fun registerResultReceiver() {
         val filter = IntentFilter(ACTION_TERMUX_RESULT)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(termuxReceiver, filter, Context.RECEIVER_EXPORTED)
         } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
             registerReceiver(termuxReceiver, filter)
         }
-        appendLog("System: Result receiver initialized successfully.")
     }
 
-    private fun setupUI() {
-        // Enable vertical scrolling for terminal output view
-        binding.tvTerminalOutput.movementMethod = ScrollingMovementMethod()
-
-        // Toggle inputs based on Mode
+    // ──────────────────────────────────────────────
+    // UI wiring
+    // ──────────────────────────────────────────────
+    private fun wireUI() {
         binding.rgMode.setOnCheckedChangeListener { _, checkedId ->
-            if (checkedId == binding.rbDual.id) {
-                isDualMode = true
-                binding.tvModeDisplay.text = getString(R.string.mode_dual)
-                binding.tvModeDisplay.setTextColor(ContextCompat.getColor(this, R.color.primary))
-            } else {
-                isDualMode = false
-                binding.tvModeDisplay.text = getString(R.string.mode_single)
-                binding.tvModeDisplay.setTextColor(ContextCompat.getColor(this, R.color.primary))
-            }
+            isDualMode = checkedId == binding.rbDual.id
+            binding.tvModeDisplay.text = getString(
+                if (isDualMode) R.string.mode_dual else R.string.mode_single
+            )
         }
 
-        // Action Buttons Listeners
-        binding.btnSaveConfig.setOnClickListener {
-            saveConfig()
-        }
-
-        binding.btnRunSetup.setOnClickListener {
-            runSetupCommand()
-        }
-
-        binding.btnStart.setOnClickListener {
-            startBotCommand()
-        }
-
-        binding.btnStop.setOnClickListener {
-            stopBotCommand()
-        }
-
-        binding.btnCheck.setOnClickListener {
-            checkBotStatus()
-        }
-
-        binding.btnRefreshLogs.setOnClickListener {
-            fetchBotLogs()
-        }
-
+        binding.btnSaveConfig.setOnClickListener { saveConfig() }
+        binding.btnRunSetup.setOnClickListener { runSetup() }
+        binding.btnStart.setOnClickListener { startBot() }
+        binding.btnStop.setOnClickListener { stopBot() }
+        binding.btnCheck.setOnClickListener { checkBotStatus() }
+        binding.btnRefreshLogs.setOnClickListener { fetchLogs() }
         binding.btnClearLogs.setOnClickListener {
-            binding.tvTerminalOutput.text = "Console cleared.\n"
+            binding.tvTerminalOutput.text = getString(R.string.terminal_placeholder)
         }
     }
 
+    // ──────────────────────────────────────────────
+    // Config persistence
+    // ──────────────────────────────────────────────
     private fun loadSavedConfig() {
-        binding.etApiId.setText(sharedPreferences.getString("api_id", ""))
-        binding.etApiHash.setText(sharedPreferences.getString("api_hash", ""))
-        binding.etBotToken.setText(sharedPreferences.getString("bot_token", ""))
-        binding.etSessionString.setText(sharedPreferences.getString("session_string", ""))
-        binding.etExtraRepo.setText(sharedPreferences.getString("extra_repo", ""))
+        binding.etApiId.setText(prefs.getString("api_id", ""))
+        binding.etApiHash.setText(prefs.getString("api_hash", ""))
+        binding.etBotToken.setText(prefs.getString("bot_token", ""))
+        binding.etSessionString.setText(prefs.getString("session_string", ""))
+        binding.etExtraRepo.setText(prefs.getString("extra_repo", ""))
 
-        isDualMode = sharedPreferences.getBoolean("is_dual_mode", false)
+        isDualMode = prefs.getBoolean("is_dual_mode", false)
         if (isDualMode) {
             binding.rbDual.isChecked = true
-            binding.tvModeDisplay.text = getString(R.string.mode_dual)
         } else {
             binding.rbSingle.isChecked = true
-            binding.tvModeDisplay.text = getString(R.string.mode_single)
         }
+        binding.tvModeDisplay.text = getString(
+            if (isDualMode) R.string.mode_dual else R.string.mode_single
+        )
     }
 
     private fun saveConfig() {
         val apiId = binding.etApiId.text.toString().trim()
         val apiHash = binding.etApiHash.text.toString().trim()
-        val botToken = binding.etBotToken.text.toString().trim()
-        val sessionString = binding.etSessionString.text.toString().trim()
-        val extraRepo = binding.etExtraRepo.text.toString().trim()
 
         if (apiId.isEmpty() || apiHash.isEmpty()) {
             Toast.makeText(this, "API ID and API HASH are required!", Toast.LENGTH_SHORT).show()
             return
         }
 
-        sharedPreferences.edit().apply {
-            putString("api_id", apiId)
-            putString("api_hash", apiHash)
-            putString("bot_token", botToken)
-            putString("session_string", sessionString)
-            putString("extra_repo", extraRepo)
-            putBoolean("is_dual_mode", isDualMode)
-            apply()
-        }
+        prefs.edit()
+            .putString("api_id", apiId)
+            .putString("api_hash", apiHash)
+            .putString("bot_token", binding.etBotToken.text.toString().trim())
+            .putString("session_string", binding.etSessionString.text.toString().trim())
+            .putString("extra_repo", binding.etExtraRepo.text.toString().trim())
+            .putBoolean("is_dual_mode", isDualMode)
+            .apply()
 
-        Toast.makeText(this, "Configuration saved successfully!", Toast.LENGTH_SHORT).show()
-        appendLog("System: Configuration saved to app storage.")
+        Toast.makeText(this, "Configuration saved.", Toast.LENGTH_SHORT).show()
+        appendLog("Config saved to app storage.")
     }
 
-    private fun executeTermuxCommand(requestCode: Int, scriptContent: String, isBackground: Boolean = true) {
-        // Create callback pending intent
+    // ──────────────────────────────────────────────
+    // Termux command execution
+    // ──────────────────────────────────────────────
+    /**
+     * Sends a bash script to Termux RunCommandService for background execution.
+     * Results are delivered back via [termuxReceiver].
+     *
+     * @param cmdTag   Identifies which logical command this is (setup/start/stop/status/logs)
+     * @param script   The bash script body to execute
+     */
+    private fun execInTermux(cmdTag: String, script: String) {
+        val reqCode = requestCounter.incrementAndGet()
+
         val callbackIntent = Intent(ACTION_TERMUX_RESULT).apply {
             setPackage(packageName)
-            putExtra("request_code", requestCode)
+            putExtra("cmd_tag", cmdTag)
         }
 
-        // FLAG_MUTABLE is absolutely critical so that Termux can append the bundle results!
         val pendingIntent = PendingIntent.getBroadcast(
             this,
-            requestCode,
+            reqCode,
             callbackIntent,
             PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        // Termux RUN_COMMAND intent construction
-        val termuxIntent = Intent().apply {
+        val intent = Intent().apply {
             setClassName(TERMUX_PACKAGE, TERMUX_SERVICE)
             action = ACTION_RUN_COMMAND
             putExtra(EXTRA_COMMAND_PATH, "/data/data/com.termux/files/usr/bin/bash")
-            putExtra(EXTRA_COMMAND_ARGUMENTS, arrayOf("-c", scriptContent))
+            putExtra(EXTRA_COMMAND_ARGUMENTS, arrayOf("-c", script))
             putExtra(EXTRA_COMMAND_WORKDIR, "/data/data/com.termux/files/home")
-            putExtra(EXTRA_COMMAND_BACKGROUND, isBackground)
+            putExtra(EXTRA_COMMAND_BACKGROUND, true)
             putExtra(EXTRA_PENDING_INTENT, pendingIntent)
         }
 
         try {
-            startService(termuxIntent)
-            appendLog("System: Sending execution request to Termux...", isMuted = true)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+        } catch (e: SecurityException) {
+            appendLog("Permission denied. Grant \"Run commands in Termux\" in app settings.", isError = true)
+            Log.e(TAG, "SecurityException starting Termux service", e)
         } catch (e: Exception) {
-            appendLog("System Error: Failed to contact Termux. Ensure Termux is installed and running.\nException: ${e.message}", isError = true)
-            Log.e(TAG, "Error executing termux command", e)
+            appendLog("Failed to contact Termux. Is it installed?", isError = true)
+            Log.e(TAG, "Error starting Termux service", e)
         }
     }
 
-    private fun runSetupCommand() {
+    // ──────────────────────────────────────────────
+    // Command builders
+    // ──────────────────────────────────────────────
+    private fun runSetup() {
         val apiId = binding.etApiId.text.toString().trim()
         val apiHash = binding.etApiHash.text.toString().trim()
         val botToken = binding.etBotToken.text.toString().trim()
-        val sessionString = binding.etSessionString.text.toString().trim()
+        val session = binding.etSessionString.text.toString().trim()
         val extraRepo = binding.etExtraRepo.text.toString().trim()
 
         if (apiId.isEmpty() || apiHash.isEmpty()) {
-            Toast.makeText(this, "Save valid configuration before running setup!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Save a valid config first!", Toast.LENGTH_SHORT).show()
             return
         }
 
-        appendLog("\n=== Starting Plain-UB Installation in Termux ===")
-        appendLog("Task: Setting up libraries, dependencies, and git repo...")
+        appendLog("═══ Starting Plain-UB Setup ═══", isSuccess = true)
 
-        // Escape variables for shell writing
-        val escapedApiId = apiId.replace("'", "'\\''")
-        val escapedApiHash = apiHash.replace("'", "'\\''")
-        val escapedBotToken = botToken.replace("'", "'\\''")
-        val escapedSessionString = sessionString.replace("'", "'\\''")
-        val escapedExtraRepo = extraRepo.replace("'", "'\\''")
-        val mode = if (isDualMode) "dual" else "single"
+        // Use a heredoc with a non-quoted delimiter so that we can safely write
+        // the config values without worrying about shell metacharacters.
+        // Kotlin string interpolation fills in the values before Termux ever sees them.
+        val ubCoreBranch = if (isDualMode) "dual_mode" else "main"
 
-        // Build temporary shell script logic inside Termux to avoid command size restrictions or string escaping issues
-        val setupScript = """
-            echo 'Initializing setup...'
-            pkg update -y && pkg install python git openssl clang python-dev libffi-dev make -y
-            
-            mkdir -p ~/plain-ub
-            if [ ! -d ~/plain-ub/.git ]; then
-                echo 'Cloning plain-ub repository...'
-                git clone https://github.com/thedragonsinn/plain-ub ~/plain-ub
-            else
-                echo 'Updating plain-ub repository...'
-                cd ~/plain-ub && git fetch --all && git reset --hard origin/main
-            fi
-            
-            cd ~/plain-ub
-            echo 'Writing configuration file...'
-            cat << 'EOF' > config.env
-API_ID=${escapedApiId}
-API_HASH=${escapedApiHash}
-BOT_TOKEN=${escapedBotToken}
-SESSION_STRING=${escapedSessionString}
-EXTRA_MODULES_REPO=${escapedExtraRepo}
-ENV_VARS=1
-EOF
+        val script = buildString {
+            appendLine("set -e")
+            appendLine("echo '[1/5] Updating packages...'")
+            appendLine("pkg update -y && pkg install -y python git openssl libffi rust binutils")
+            appendLine()
+            appendLine("echo '[2/5] Cloning / updating repository...'")
+            appendLine("if [ ! -d ~/plain-ub/.git ]; then")
+            appendLine("  git clone https://github.com/thedragonsinn/plain-ub ~/plain-ub")
+            appendLine("else")
+            appendLine("  cd ~/plain-ub && git fetch --all && git reset --hard origin/main")
+            appendLine("fi")
+            appendLine()
+            appendLine("cd ~/plain-ub")
+            appendLine("echo '[3/5] Writing config.env...'")
+            // Write config.env using printf to avoid heredoc escaping issues
+            appendLine("printf '%s\\n' \\")
+            appendLine("  'API_ID=${apiId}' \\")
+            appendLine("  'API_HASH=${apiHash}' \\")
+            appendLine("  'BOT_TOKEN=${botToken}' \\")
+            appendLine("  'SESSION_STRING=${session}' \\")
+            appendLine("  'EXTRA_MODULES_REPO=${extraRepo}' \\")
+            appendLine("  'ENV_VARS=1' \\")
+            appendLine("  > config.env")
+            appendLine()
+            appendLine("echo '[4/5] Installing Python dependencies...'")
+            appendLine("pip install --upgrade pip")
+            appendLine("pip install -r requirements.txt 2>&1 || true")
+            appendLine()
+            appendLine("echo '[5/5] Installing ub-core (${ubCoreBranch})...'")
+            appendLine("pip install --force-reinstall 'git+https://github.com/thedragonsinn/ub-core@${ubCoreBranch}'")
+            appendLine()
+            appendLine("echo 'SETUP_COMPLETE'")
+        }
 
-            echo 'Installing requirements.txt...'
-            pip install --upgrade pip
-            pip install -r requirements.txt
-            
-            if [ "${mode}" = "dual" ]; then
-                echo 'Installing ub-core DUAL MODE branch...'
-                pip install --force-reinstall git+https://github.com/thedragonsinn/ub-core@dual_mode
-            else
-                echo 'Installing ub-core SINGLE CLIENT branch...'
-                pip install --force-reinstall git+https://github.com/thedragonsinn/ub-core@main
-            fi
-            
-            echo 'SETUP COMPLETE: All configurations and dependencies configured successfully!'
-        """.trimIndent()
-
-        executeTermuxCommand(REQ_SETUP, setupScript)
+        execInTermux(CMD_SETUP, script)
     }
 
-    private fun startBotCommand() {
-        appendLog("\n=== Starting Plain-UB User-Bot ===")
-        
-        // Execute background startup command that redirects outputs to bot.log
-        val startScript = """
-            cd ~/plain-ub
-            # Check if running first
-            if pgrep -f "python3 -m app" > /dev/null; then
+    private fun startBot() {
+        appendLog("═══ Starting Bot ═══")
+        val script = """
+            cd ~/plain-ub || { echo "NOT_INSTALLED"; exit 1; }
+            if pgrep -f "python3 -m app" > /dev/null 2>&1; then
                 echo "ALREADY_RUNNING"
             else
-                nohup python3 -m app > bot.log 2>&1 &
-                sleep 2
-                if pgrep -f "python3 -m app" > /dev/null; then
-                    echo "START_SUCCESS"
+                nohup python3 -m app >> bot.log 2>&1 &
+                sleep 3
+                if pgrep -f "python3 -m app" > /dev/null 2>&1; then
+                    echo "START_OK"
                 else
-                    echo "START_FAILED"
+                    echo "START_FAIL"
+                    tail -20 bot.log 2>/dev/null
                 fi
             fi
         """.trimIndent()
-
-        executeTermuxCommand(REQ_START, startScript)
+        execInTermux(CMD_START, script)
     }
 
-    private fun stopBotCommand() {
-        appendLog("\n=== Stopping Plain-UB User-Bot ===")
-
-        val stopScript = """
-            if pgrep -f "python3 -m app" > /dev/null; then
-                pkill -9 -f "python3 -m app"
-                pkill -9 -f "app"
+    private fun stopBot() {
+        appendLog("═══ Stopping Bot ═══")
+        // Only kill processes whose full command line matches "python3 -m app"
+        // This avoids killing unrelated processes
+        val script = """
+            if pgrep -f "python3 -m app" > /dev/null 2>&1; then
+                pkill -f "python3 -m app"
                 sleep 1
-                if pgrep -f "python3 -m app" > /dev/null; then
-                    echo "STOP_FAILED"
+                if pgrep -f "python3 -m app" > /dev/null 2>&1; then
+                    pkill -9 -f "python3 -m app"
+                    sleep 1
+                fi
+                if pgrep -f "python3 -m app" > /dev/null 2>&1; then
+                    echo "STOP_FAIL"
                 else
-                    echo "STOP_SUCCESS"
+                    echo "STOP_OK"
                 fi
             else
                 echo "NOT_RUNNING"
             fi
         """.trimIndent()
-
-        executeTermuxCommand(REQ_STOP, stopScript)
+        execInTermux(CMD_STOP, script)
     }
 
     private fun checkBotStatus() {
-        val statusScript = """
+        val script = """
             if [ ! -d ~/plain-ub ]; then
                 echo "UNINSTALLED"
-            elif pgrep -f "python3 -m app" > /dev/null; then
+            elif pgrep -f "python3 -m app" > /dev/null 2>&1; then
                 echo "RUNNING"
             else
                 echo "STOPPED"
             fi
         """.trimIndent()
-
-        executeTermuxCommand(REQ_STATUS, statusScript)
+        execInTermux(CMD_STATUS, script)
     }
 
-    private fun fetchBotLogs() {
-        appendLog("System: Fetching bot log output...", isMuted = true)
-        val logScript = """
+    private fun fetchLogs() {
+        appendLog("Fetching logs…", isMuted = true)
+        val script = """
             if [ -f ~/plain-ub/bot.log ]; then
-                tail -n 100 ~/plain-ub/bot.log
+                tail -n 150 ~/plain-ub/bot.log
             else
-                echo "LOG_FILE_MISSING"
+                echo "LOG_NOT_FOUND"
             fi
         """.trimIndent()
-
-        executeTermuxCommand(REQ_LOGS, logScript)
+        execInTermux(CMD_LOGS, script)
     }
 
-    private fun handleTermuxResult(requestCode: Int, stdout: String, stderr: String, exitCode: Int, errCode: String) {
-        val cleanStdout = stdout.trim()
-        val cleanStderr = stderr.trim()
-
-        if (errCode.isNotEmpty()) {
-            appendLog("Termux System Error (Code: $errCode): Ensure Termux allows external apps and permission is granted.", isError = true)
+    // ──────────────────────────────────────────────
+    // Result handling
+    // ──────────────────────────────────────────────
+    private fun handleResult(cmd: String, stdout: String, stderr: String, exitCode: Int, err: String) {
+        // If Termux itself errored (e.g. permission denied), show that first
+        if (err.isNotEmpty()) {
+            appendLog("Termux error: $err", isError = true)
             return
         }
 
-        when (requestCode) {
-            REQ_SETUP -> {
-                appendLog(cleanStdout)
-                if (cleanStderr.isNotEmpty()) {
-                    appendLog("Logs:\n$cleanStderr", isMuted = true)
-                }
-                if (exitCode == 0) {
-                    appendLog("Success: Setup completed perfectly!", isSuccess = true)
-                } else {
-                    appendLog("Error: Setup script exited with code $exitCode.", isError = true)
+        when (cmd) {
+            CMD_SETUP -> {
+                if (stdout.isNotEmpty()) appendLog(stdout)
+                if (stderr.isNotEmpty()) appendLog(stderr, isMuted = true)
+                if (stdout.contains("SETUP_COMPLETE")) {
+                    appendLog("✓ Setup completed successfully!", isSuccess = true)
+                } else if (exitCode != 0) {
+                    appendLog("✗ Setup failed (exit $exitCode).", isError = true)
                 }
                 checkBotStatus()
             }
-            REQ_START -> {
-                when {
-                    cleanStdout.contains("ALREADY_RUNNING") -> {
-                        appendLog("Status: Bot is already active and running.")
-                        updateStatusUI("RUNNING")
-                    }
-                    cleanStdout.contains("START_SUCCESS") -> {
-                        appendLog("Success: Plain-UB User-bot successfully initialized in background!", isSuccess = true)
-                        updateStatusUI("RUNNING")
-                        // Wait a brief second then fetch logs automatically to show startup outputs
-                        binding.root.postDelayed({ fetchBotLogs() }, 1500)
-                    }
-                    cleanStdout.contains("START_FAILED") -> {
-                        appendLog("Error: Bot command failed to maintain process. Check logs for details.", isError = true)
-                        updateStatusUI("STOPPED")
-                        fetchBotLogs()
-                    }
-                    else -> {
-                        appendLog(cleanStdout)
-                        if (cleanStderr.isNotEmpty()) appendLog(cleanStderr, isError = true)
-                        checkBotStatus()
-                    }
+
+            CMD_START -> when {
+                stdout.contains("ALREADY_RUNNING") -> {
+                    appendLog("Bot is already running.")
+                    setStatus("RUNNING")
+                }
+                stdout.contains("START_OK") -> {
+                    appendLog("✓ Bot started!", isSuccess = true)
+                    setStatus("RUNNING")
+                    binding.root.postDelayed({ fetchLogs() }, 2000)
+                }
+                stdout.contains("NOT_INSTALLED") -> {
+                    appendLog("plain-ub not found. Run setup first.", isError = true)
+                    setStatus("UNINSTALLED")
+                }
+                else -> {
+                    appendLog("✗ Bot failed to start.", isError = true)
+                    if (stdout.isNotEmpty()) appendLog(stdout)
+                    if (stderr.isNotEmpty()) appendLog(stderr, isError = true)
+                    setStatus("STOPPED")
                 }
             }
-            REQ_STOP -> {
-                when {
-                    cleanStdout.contains("STOP_SUCCESS") || cleanStdout.contains("NOT_RUNNING") -> {
-                        appendLog("Success: User-bot terminated.", isSuccess = true)
-                        updateStatusUI("STOPPED")
-                    }
-                    cleanStdout.contains("STOP_FAILED") -> {
-                        appendLog("Warning: Force kill command failed to stop the process.", isError = true)
-                        checkBotStatus()
-                    }
-                    else -> {
-                        appendLog(cleanStdout)
-                        checkBotStatus()
-                    }
+
+            CMD_STOP -> when {
+                stdout.contains("STOP_OK") || stdout.contains("NOT_RUNNING") -> {
+                    appendLog("✓ Bot stopped.", isSuccess = true)
+                    setStatus("STOPPED")
+                }
+                stdout.contains("STOP_FAIL") -> {
+                    appendLog("✗ Could not kill bot process.", isError = true)
+                    checkBotStatus()
+                }
+                else -> {
+                    if (stdout.isNotEmpty()) appendLog(stdout)
+                    checkBotStatus()
                 }
             }
-            REQ_STATUS -> {
-                val status = cleanStdout.split("\n").lastOrNull()?.trim() ?: "STOPPED"
-                updateStatusUI(status)
+
+            CMD_STATUS -> {
+                val status = stdout.lines().lastOrNull { it.isNotBlank() }?.trim() ?: "STOPPED"
+                setStatus(status)
             }
-            REQ_LOGS -> {
-                if (cleanStdout == "LOG_FILE_MISSING") {
-                    binding.tvTerminalOutput.text = "Console log is empty or bot.log hasn't been created yet.\n"
+
+            CMD_LOGS -> {
+                if (stdout == "LOG_NOT_FOUND") {
+                    appendLog("No bot.log found yet. Start the bot first.", isMuted = true)
                 } else {
-                    binding.tvTerminalOutput.text = cleanStdout
-                    if (cleanStderr.isNotEmpty()) {
-                        binding.tvTerminalOutput.append("\nErrors:\n$cleanStderr")
+                    // Replace terminal content entirely with fresh log output
+                    binding.tvTerminalOutput.text = stdout
+                    if (stderr.isNotEmpty()) {
+                        binding.tvTerminalOutput.append("\n--- stderr ---\n$stderr")
                     }
-                    // Auto-scroll to bottom of log scroll view
-                    binding.svTerminal.post {
-                        binding.svTerminal.fullScroll(View.FOCUS_DOWN)
-                    }
+                    scrollTerminalToBottom()
                 }
             }
         }
     }
 
-    private fun updateStatusUI(status: String) {
-        when (status) {
-            "RUNNING" -> {
-                binding.tvStatusBadge.text = getString(R.string.status_running)
-                binding.tvStatusBadge.backgroundTintList = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.status_running))
-                binding.tvStatusBadge.setTextColor(Color.WHITE)
-            }
-            "STOPPED" -> {
-                binding.tvStatusBadge.text = getString(R.string.status_stopped)
-                binding.tvStatusBadge.backgroundTintList = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.status_stopped))
-                binding.tvStatusBadge.setTextColor(Color.WHITE)
-            }
-            "UNINSTALLED" -> {
-                binding.tvStatusBadge.text = getString(R.string.status_uninstalled)
-                binding.tvStatusBadge.backgroundTintList = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.status_uninstalled))
-                binding.tvStatusBadge.setTextColor(Color.WHITE)
-            }
+    // ──────────────────────────────────────────────
+    // UI helpers
+    // ──────────────────────────────────────────────
+    private fun setStatus(status: String) {
+        val (textRes, colorRes) = when (status) {
+            "RUNNING" -> R.string.status_running to R.color.status_running
+            "UNINSTALLED" -> R.string.status_uninstalled to R.color.status_uninstalled
+            else -> R.string.status_stopped to R.color.status_stopped
         }
+        binding.tvStatusBadge.text = getString(textRes)
+        binding.tvStatusBadge.backgroundTintList =
+            ColorStateList.valueOf(ContextCompat.getColor(this, colorRes))
+        binding.tvStatusBadge.setTextColor(Color.WHITE)
     }
 
-    private fun appendLog(message: String, isError: Boolean = false, isSuccess: Boolean = false, isMuted: Boolean = false) {
-        val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
-        val timestamp = sdf.format(Date())
-        val prefix = "[$timestamp] "
-        
-        val coloredMessage = when {
-            isError -> {
-                val errorColor = String.format("#%06X", 0xFFFFFF and ContextCompat.getColor(this, R.color.terminal_error))
-                "<font color='$errorColor'>$prefix$message</font><br/>"
-            }
-            isSuccess -> {
-                val successColor = String.format("#%06X", 0xFFFFFF and ContextCompat.getColor(this, R.color.terminal_success))
-                "<font color='$successColor'>$prefix$message</font><br/>"
-            }
-            isMuted -> {
-                val mutedColor = String.format("#%06X", 0xFFFFFF and ContextCompat.getColor(this, R.color.text_muted))
-                "<font color='$mutedColor'>$prefix$message</font><br/>"
-            }
-            else -> {
-                val normalColor = String.format("#%06X", 0xFFFFFF and ContextCompat.getColor(this, R.color.terminal_text))
-                "<font color='$normalColor'>$prefix$message</font><br/>"
-            }
+    private fun appendLog(
+        message: String,
+        isError: Boolean = false,
+        isSuccess: Boolean = false,
+        isMuted: Boolean = false
+    ) {
+        val ts = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+
+        val colorRes = when {
+            isError -> R.color.terminal_error
+            isSuccess -> R.color.terminal_success
+            isMuted -> R.color.text_muted
+            else -> R.color.terminal_text
         }
-        
-        binding.tvTerminalOutput.append(android.text.Html.fromHtml(coloredMessage, android.text.Html.FROM_HTML_MODE_LEGACY))
-        
-        // Auto scroll
+        val hex = String.format("#%06X", 0xFFFFFF and ContextCompat.getColor(this, colorRes))
+        val html = "<font color='$hex'>[$ts] $message</font><br/>"
+
+        binding.tvTerminalOutput.append(
+            android.text.Html.fromHtml(html, android.text.Html.FROM_HTML_MODE_LEGACY)
+        )
+        scrollTerminalToBottom()
+    }
+
+    private fun scrollTerminalToBottom() {
         binding.svTerminal.post {
             binding.svTerminal.fullScroll(View.FOCUS_DOWN)
         }
