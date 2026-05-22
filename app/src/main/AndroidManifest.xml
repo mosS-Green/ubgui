@@ -3,6 +3,7 @@
 
     <!-- Permission required to run commands in Termux -->
     <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:allowBackup="true"

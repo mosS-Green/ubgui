@@ -15,10 +15,23 @@ import android.view.View
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.transition.AutoTransition
+import androidx.transition.TransitionManager
 import com.plainub.gui.databinding.ActivityMainBinding
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
+import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class MainActivity : AppCompatActivity() {
@@ -29,6 +42,22 @@ class MainActivity : AppCompatActivity() {
 
     // Atomic counter to generate unique request codes per invocation
     private val requestCounter = AtomicInteger(0)
+
+    // Store last command output for AI diagnosis
+    private var lastStdout: String = ""
+    private var lastStderr: String = ""
+
+    // Extra env vars from paste (keys not in the known set)
+    private val extraEnvVars = mutableMapOf<String, String>()
+
+    // OkHttp client for Gemini API calls
+    private val httpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .build()
+    }
 
     companion object {
         private const val TAG = "PlainUBGui"
@@ -51,6 +80,13 @@ class MainActivity : AppCompatActivity() {
         private const val CMD_STOP = "stop"
         private const val CMD_STATUS = "status"
         private const val CMD_LOGS = "logs"
+        private const val CMD_CUSTOM = "custom"
+
+        // Known env keys that map to specific UI fields
+        private val KNOWN_ENV_KEYS = setOf(
+            "API_ID", "API_HASH", "BOT_TOKEN", "SESSION_STRING",
+            "EXTRA_MODULES_REPO", "DATABASE_URL", "USE_DUAL_BRANCH"
+        )
     }
 
     // ──────────────────────────────────────────────
@@ -116,6 +152,7 @@ class MainActivity : AppCompatActivity() {
     // UI wiring
     // ──────────────────────────────────────────────
     private fun wireUI() {
+        // Mode radio group
         binding.rgMode.setOnCheckedChangeListener { _, checkedId ->
             isDualMode = checkedId == binding.rbDual.id
             binding.tvModeDisplay.text = getString(
@@ -123,15 +160,139 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
+        // Config buttons
         binding.btnSaveConfig.setOnClickListener { saveConfig() }
+
+        // Paste env toggle
+        binding.btnPasteEnv.setOnClickListener { toggleEnvPaste() }
+        binding.btnParseFill.setOnClickListener { parseAndFillEnv() }
+
+        // Setup & bot controls
         binding.btnRunSetup.setOnClickListener { runSetup() }
         binding.btnStart.setOnClickListener { startBot() }
         binding.btnStop.setOnClickListener { stopBot() }
         binding.btnCheck.setOnClickListener { checkBotStatus() }
+
+        // Log controls
         binding.btnRefreshLogs.setOnClickListener { fetchLogs() }
         binding.btnClearLogs.setOnClickListener {
             binding.tvTerminalOutput.text = getString(R.string.terminal_placeholder)
         }
+
+        // AI diagnosis
+        binding.btnDiagnose.setOnClickListener { diagnoseWithGemini() }
+
+        // Collapsible custom command
+        binding.headerCustomCmd.setOnClickListener { toggleCustomCmd() }
+        binding.btnSendCmd.setOnClickListener { runCustomCommand() }
+    }
+
+    // ──────────────────────────────────────────────
+    // Paste .env toggle & parse
+    // ──────────────────────────────────────────────
+    private fun toggleEnvPaste() {
+        val layout = binding.layoutEnvPaste
+        TransitionManager.beginDelayedTransition(
+            binding.root.findViewById(android.R.id.content) ?: binding.root,
+            AutoTransition().apply { duration = 200 }
+        )
+        layout.visibility = if (layout.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+    }
+
+    private fun parseAndFillEnv() {
+        val content = binding.etEnvPaste.text.toString()
+        if (content.isBlank()) {
+            Toast.makeText(this, "Nothing to parse", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val parsed = parseEnvContent(content)
+        if (parsed.isEmpty()) {
+            Toast.makeText(this, "No valid KEY=VALUE pairs found", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // Fill known fields
+        parsed["API_ID"]?.let { binding.etApiId.setText(it) }
+        parsed["API_HASH"]?.let { binding.etApiHash.setText(it) }
+        parsed["BOT_TOKEN"]?.let { binding.etBotToken.setText(it) }
+        parsed["SESSION_STRING"]?.let { binding.etSessionString.setText(it) }
+        parsed["EXTRA_MODULES_REPO"]?.let { binding.etExtraRepo.setText(it) }
+        parsed["DATABASE_URL"]?.let { binding.etDatabaseUrl.setText(it) }
+
+        // Handle dual mode
+        parsed["USE_DUAL_BRANCH"]?.let {
+            if (it == "1" || it.equals("true", ignoreCase = true)) {
+                binding.rbDual.isChecked = true
+            }
+        }
+
+        // Store extra env vars not in the known set
+        extraEnvVars.clear()
+        parsed.forEach { (key, value) ->
+            if (key !in KNOWN_ENV_KEYS) {
+                extraEnvVars[key] = value
+            }
+        }
+
+        Toast.makeText(this, getString(R.string.env_parsed, parsed.size), Toast.LENGTH_SHORT).show()
+        appendLog("Parsed ${parsed.size} variables from pasted .env content")
+
+        // Collapse the paste area
+        binding.layoutEnvPaste.visibility = View.GONE
+        binding.etEnvPaste.text?.clear()
+    }
+
+    /**
+     * Parses .env file content into a map.
+     * Supports: KEY=VALUE, export KEY=VALUE, "quoted values", 'single quoted', # comments
+     */
+    private fun parseEnvContent(content: String): Map<String, String> {
+        return content.lines()
+            .map { it.trim() }
+            .filter { it.isNotBlank() && !it.startsWith("#") }
+            .mapNotNull { line ->
+                val cleaned = line.removePrefix("export ").trim()
+                val eqIndex = cleaned.indexOf('=')
+                if (eqIndex > 0) {
+                    val key = cleaned.substring(0, eqIndex).trim()
+                    val value = cleaned.substring(eqIndex + 1).trim()
+                        .removeSurrounding("\"")
+                        .removeSurrounding("'")
+                    key to value
+                } else null
+            }
+            .toMap()
+    }
+
+    // ──────────────────────────────────────────────
+    // Collapsible custom command
+    // ──────────────────────────────────────────────
+    private fun toggleCustomCmd() {
+        val layout = binding.layoutCustomCmd
+        val chevron = binding.ivChevronCmd
+        TransitionManager.beginDelayedTransition(
+            binding.root.findViewById(android.R.id.content) ?: binding.root,
+            AutoTransition().apply { duration = 200 }
+        )
+        if (layout.visibility == View.VISIBLE) {
+            layout.visibility = View.GONE
+            chevron.rotation = 0f
+        } else {
+            layout.visibility = View.VISIBLE
+            chevron.rotation = 180f
+        }
+    }
+
+    private fun runCustomCommand() {
+        val cmd = binding.etCustomCmd.text.toString().trim()
+        if (cmd.isEmpty()) {
+            Toast.makeText(this, "Enter a command first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        appendLog("» $cmd", isMuted = true)
+        execInTermux(CMD_CUSTOM, cmd)
+        binding.etCustomCmd.text?.clear()
     }
 
     // ──────────────────────────────────────────────
@@ -143,6 +304,8 @@ class MainActivity : AppCompatActivity() {
         binding.etBotToken.setText(prefs.getString("bot_token", ""))
         binding.etSessionString.setText(prefs.getString("session_string", ""))
         binding.etExtraRepo.setText(prefs.getString("extra_repo", ""))
+        binding.etDatabaseUrl.setText(prefs.getString("database_url", ""))
+        binding.etGeminiKey.setText(prefs.getString("gemini_key", ""))
 
         isDualMode = prefs.getBoolean("is_dual_mode", false)
         if (isDualMode) {
@@ -170,6 +333,8 @@ class MainActivity : AppCompatActivity() {
             .putString("bot_token", binding.etBotToken.text.toString().trim())
             .putString("session_string", binding.etSessionString.text.toString().trim())
             .putString("extra_repo", binding.etExtraRepo.text.toString().trim())
+            .putString("database_url", binding.etDatabaseUrl.text.toString().trim())
+            .putString("gemini_key", binding.etGeminiKey.text.toString().trim())
             .putBoolean("is_dual_mode", isDualMode)
             .apply()
 
@@ -228,7 +393,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ──────────────────────────────────────────────
-    // Command builders
+    // Command builders (revised per creator's guide)
     // ──────────────────────────────────────────────
     private fun runSetup() {
         val apiId = binding.etApiId.text.toString().trim()
@@ -236,6 +401,7 @@ class MainActivity : AppCompatActivity() {
         val botToken = binding.etBotToken.text.toString().trim()
         val session = binding.etSessionString.text.toString().trim()
         val extraRepo = binding.etExtraRepo.text.toString().trim()
+        val databaseUrl = binding.etDatabaseUrl.text.toString().trim()
 
         if (apiId.isEmpty() || apiHash.isEmpty()) {
             Toast.makeText(this, "Save a valid config first!", Toast.LENGTH_SHORT).show()
@@ -244,41 +410,45 @@ class MainActivity : AppCompatActivity() {
 
         appendLog("═══ Starting Plain-UB Setup ═══", isSuccess = true)
 
-        // Use a heredoc with a non-quoted delimiter so that we can safely write
-        // the config values without worrying about shell metacharacters.
-        // Kotlin string interpolation fills in the values before Termux ever sees them.
-        val ubCoreBranch = if (isDualMode) "dual_mode" else "main"
-
         val script = buildString {
             appendLine("set -e")
-            appendLine("echo '[1/5] Updating packages...'")
-            appendLine("pkg update -y && pkg install -y python git openssl libffi rust binutils")
+            appendLine("echo '[1/6] Updating packages...'")
+            appendLine("apt update -y && apt install -y python3 git curl python-pip ffmpeg python-numpy")
             appendLine()
-            appendLine("echo '[2/5] Cloning / updating repository...'")
-            appendLine("if [ ! -d ~/plain-ub/.git ]; then")
-            appendLine("  git clone https://github.com/thedragonsinn/plain-ub ~/plain-ub")
+            appendLine("echo '[2/6] Cloning / updating repository...'")
+            appendLine("if [ ! -d ~/ubot/.git ]; then")
+            appendLine("  git clone -q https://github.com/thedragonsinn/plain-ub ~/ubot")
             appendLine("else")
-            appendLine("  cd ~/plain-ub && git fetch --all && git reset --hard origin/main")
+            appendLine("  cd ~/ubot && git fetch --all && git reset --hard origin/main")
             appendLine("fi")
             appendLine()
-            appendLine("cd ~/plain-ub")
-            appendLine("echo '[3/5] Writing config.env...'")
-            // Write config.env using printf to avoid heredoc escaping issues
-            appendLine("printf '%s\\n' \\")
-            appendLine("  'API_ID=${apiId}' \\")
-            appendLine("  'API_HASH=${apiHash}' \\")
-            appendLine("  'BOT_TOKEN=${botToken}' \\")
-            appendLine("  'SESSION_STRING=${session}' \\")
-            appendLine("  'EXTRA_MODULES_REPO=${extraRepo}' \\")
-            appendLine("  'ENV_VARS=1' \\")
-            appendLine("  > config.env")
+            appendLine("cd ~/ubot")
+            appendLine("echo '[3/6] Writing config.env...'")
+            appendLine("cp sample-config.env config.env 2>/dev/null || true")
+            // Write config values via printf
+            append("printf '%s\\n'")
+            append(" 'API_ID=${apiId}'")
+            append(" 'API_HASH=${apiHash}'")
+            if (botToken.isNotEmpty()) append(" 'BOT_TOKEN=${botToken}'")
+            if (session.isNotEmpty()) append(" 'SESSION_STRING=${session}'")
+            if (extraRepo.isNotEmpty()) append(" 'EXTRA_MODULES_REPO=${extraRepo}'")
+            if (databaseUrl.isNotEmpty()) append(" 'DATABASE_URL=${databaseUrl}'")
+            if (isDualMode) append(" 'USE_DUAL_BRANCH=1'")
+            append(" 'ENV_VARS=1'")
+            // Include any extra env vars from paste
+            extraEnvVars.forEach { (key, value) ->
+                append(" '${key}=${value}'")
+            }
+            appendLine(" > config.env")
             appendLine()
-            appendLine("echo '[4/5] Installing Python dependencies...'")
-            appendLine("pip install --upgrade pip")
-            appendLine("pip install -r requirements.txt 2>&1 || true")
+            appendLine("echo '[4/6] Upgrading pip tools...'")
+            appendLine("pip install -U setuptools wheel")
             appendLine()
-            appendLine("echo '[5/5] Installing ub-core (${ubCoreBranch})...'")
-            appendLine("pip install --force-reinstall 'git+https://github.com/thedragonsinn/ub-core@${ubCoreBranch}'")
+            appendLine("echo '[5/6] Installing Termux requirements...'")
+            appendLine("bash scripts/install_termux_reqs.sh 2>&1")
+            appendLine()
+            appendLine("echo '[6/6] Installing ub-core...'")
+            appendLine("./scripts/install_ub_core.sh 2>&1")
             appendLine()
             appendLine("echo 'SETUP_COMPLETE'")
         }
@@ -289,11 +459,11 @@ class MainActivity : AppCompatActivity() {
     private fun startBot() {
         appendLog("═══ Starting Bot ═══")
         val script = """
-            cd ~/plain-ub || { echo "NOT_INSTALLED"; exit 1; }
+            cd ~/ubot || { echo "NOT_INSTALLED"; exit 1; }
             if pgrep -f "python3 -m app" > /dev/null 2>&1; then
                 echo "ALREADY_RUNNING"
             else
-                nohup python3 -m app >> bot.log 2>&1 &
+                nohup ./run >> bot.log 2>&1 &
                 sleep 3
                 if pgrep -f "python3 -m app" > /dev/null 2>&1; then
                     echo "START_OK"
@@ -308,8 +478,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopBot() {
         appendLog("═══ Stopping Bot ═══")
-        // Only kill processes whose full command line matches "python3 -m app"
-        // This avoids killing unrelated processes
         val script = """
             if pgrep -f "python3 -m app" > /dev/null 2>&1; then
                 pkill -f "python3 -m app"
@@ -332,7 +500,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun checkBotStatus() {
         val script = """
-            if [ ! -d ~/plain-ub ]; then
+            if [ ! -d ~/ubot ]; then
                 echo "UNINSTALLED"
             elif pgrep -f "python3 -m app" > /dev/null 2>&1; then
                 echo "RUNNING"
@@ -346,8 +514,8 @@ class MainActivity : AppCompatActivity() {
     private fun fetchLogs() {
         appendLog("Fetching logs…", isMuted = true)
         val script = """
-            if [ -f ~/plain-ub/bot.log ]; then
-                tail -n 150 ~/plain-ub/bot.log
+            if [ -f ~/ubot/bot.log ]; then
+                tail -n 150 ~/ubot/bot.log
             else
                 echo "LOG_NOT_FOUND"
             fi
@@ -359,6 +527,10 @@ class MainActivity : AppCompatActivity() {
     // Result handling
     // ──────────────────────────────────────────────
     private fun handleResult(cmd: String, stdout: String, stderr: String, exitCode: Int, err: String) {
+        // Always capture last output for AI diagnosis
+        lastStdout = stdout
+        lastStderr = stderr
+
         // If Termux itself errored (e.g. permission denied), show that first
         if (err.isNotEmpty()) {
             appendLog("Termux error: $err", isError = true)
@@ -429,6 +601,126 @@ class MainActivity : AppCompatActivity() {
                         binding.tvTerminalOutput.append("\n--- stderr ---\n$stderr")
                     }
                     scrollTerminalToBottom()
+                }
+            }
+
+            CMD_CUSTOM -> {
+                if (stdout.isNotEmpty()) appendLog(stdout)
+                if (stderr.isNotEmpty()) appendLog(stderr, isError = true)
+                if (exitCode != 0 && stdout.isEmpty() && stderr.isEmpty()) {
+                    appendLog("Command exited with code $exitCode", isMuted = true)
+                }
+            }
+        }
+    }
+
+    // ──────────────────────────────────────────────
+    // Gemini AI Error Diagnosis
+    // ──────────────────────────────────────────────
+    private fun diagnoseWithGemini() {
+        val apiKey = prefs.getString("gemini_key", "") ?: ""
+        if (apiKey.isBlank()) {
+            Toast.makeText(this, getString(R.string.ai_no_key), Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val errorContext = buildString {
+            if (lastStderr.isNotBlank()) appendLine("STDERR:\n$lastStderr")
+            if (lastStdout.isNotBlank()) {
+                appendLine("STDOUT (last 100 lines):")
+                appendLine(lastStdout.lines().takeLast(100).joinToString("\n"))
+            }
+        }
+        if (errorContext.isBlank()) {
+            Toast.makeText(this, getString(R.string.ai_no_error), Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // Show loading state
+        binding.layoutAiResponse.visibility = View.VISIBLE
+        binding.tvAiResponse.text = getString(R.string.ai_analyzing)
+        binding.progressAi.visibility = View.VISIBLE
+
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val prompt = buildString {
+                    appendLine("You are a Termux/Android package installation expert.")
+                    appendLine("The user is running plain-ub setup on Termux (ARM Android).")
+                    appendLine("Diagnose this error and provide the EXACT commands to fix it.")
+                    appendLine("Be concise. Give the fix commands first, then a brief explanation.")
+                    appendLine()
+                    appendLine("--- ERROR LOG ---")
+                    appendLine(errorContext.take(4000))
+                }
+
+                val jsonBody = JSONObject().apply {
+                    put("model", "gemini-2.5-flash")
+                    put("input", prompt)
+                    put("tools", JSONArray().put(JSONObject().put("type", "google_search")))
+                    put("generation_config", JSONObject().put("thinking_level", "high"))
+                    put("system_instruction",
+                        "You are a Termux expert. Be concise. Commands first, explanation second. " +
+                        "Focus on practical fixes for pip install failures on ARM Android.")
+                }
+
+                val request = Request.Builder()
+                    .url("https://generativelanguage.googleapis.com/v1beta/interactions")
+                    .addHeader("x-goog-api-key", apiKey)
+                    .addHeader("Content-Type", "application/json")
+                    .addHeader("Api-Revision", "2026-05-20")
+                    .post(jsonBody.toString().toRequestBody("application/json".toMediaType()))
+                    .build()
+
+                val response = httpClient.newCall(request).execute()
+                val body = response.body?.string() ?: ""
+
+                if (!response.isSuccessful) {
+                    val errorMsg = try {
+                        JSONObject(body).optJSONObject("error")?.optString("message")
+                            ?: "HTTP ${response.code}"
+                    } catch (_: Exception) {
+                        "HTTP ${response.code}: ${body.take(200)}"
+                    }
+                    withContext(Dispatchers.Main) {
+                        binding.tvAiResponse.text = "API Error: $errorMsg"
+                        binding.progressAi.visibility = View.GONE
+                    }
+                    return@launch
+                }
+
+                val json = JSONObject(body)
+
+                // Extract text from the last model_output step
+                val steps = json.optJSONArray("steps")
+                var resultText = ""
+                if (steps != null) {
+                    for (i in steps.length() - 1 downTo 0) {
+                        val step = steps.getJSONObject(i)
+                        if (step.optString("type") == "model_output") {
+                            val content = step.optJSONArray("content")
+                            if (content != null) {
+                                for (j in 0 until content.length()) {
+                                    val block = content.getJSONObject(j)
+                                    if (block.optString("type") == "text") {
+                                        resultText = block.optString("text", "")
+                                        break
+                                    }
+                                }
+                            }
+                            break
+                        }
+                    }
+                }
+
+                withContext(Dispatchers.Main) {
+                    binding.tvAiResponse.text = resultText.ifBlank { "No diagnosis available. Try again." }
+                    binding.progressAi.visibility = View.GONE
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Gemini API error", e)
+                withContext(Dispatchers.Main) {
+                    binding.tvAiResponse.text = "Error: ${e.message}"
+                    binding.progressAi.visibility = View.GONE
                 }
             }
         }

@@ -29,4 +29,22 @@
     <color name="text_muted">#6B7280</color>
     
     <color name="tint_glow">#2A354F</color>
+
+    <!-- M3 Expressive Containers -->
+    <color name="primary_container">#1E1B4B</color>
+    <color name="on_primary_container">#C7D2FE</color>
+    <color name="surface_container">#151C2E</color>
+    <color name="surface_container_high">#1C2640</color>
+
+    <!-- AI Accent (Amber) -->
+    <color name="ai_accent">#F59E0B</color>
+    <color name="ai_container">#1C1507</color>
+    <color name="ai_on_container">#FDE68A</color>
+
+    <!-- Refined Outlines -->
+    <color name="outline">#2A3550</color>
+    <color name="outline_variant">#1E293B</color>
+
+    <!-- Divider -->
+    <color name="divider">#1F2937</color>
 </resources>

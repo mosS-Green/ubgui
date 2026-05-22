@@ -28,6 +28,8 @@
     <string name="hint_bot_token">BOT_TOKEN (for dual mode / bot client)</string>
     <string name="hint_session_string">SESSION_STRING (Pyrogram String Session)</string>
     <string name="hint_extra_repo">EXTRA_MODULES_REPO (Optional)</string>
+    <string name="hint_database_url">DATABASE_URL (MongoDB connection string)</string>
+    <string name="hint_gemini_key">Gemini API Key</string>
     <string name="choose_mode">Choose Bot Mode:</string>
     <string name="terminal_header">Termux Log Console</string>
     <string name="terminal_placeholder">Console ready. Log entries will appear here…</string>
@@ -37,5 +39,25 @@
     <string name="setup_step1_title">1. Configure Termux Permissions</string>
     <string name="setup_step1_desc">Ensure your Termux properties allow external apps.\n\nIn Termux, run:\necho \"allow-external-apps = true\" &gt;&gt; ~/.termux/termux.properties\ntermux-reload-settings\n\nAlso grant \"Run commands in Termux\" permission in Android Settings → Apps → Plain-UB Dashboard → Permissions.</string>
     <string name="setup_step2_title">2. Automate Environment Build</string>
-    <string name="setup_step2_desc">This step automatically downloads Python, Git, and system libraries inside Termux, clones the plain-ub repository, generates the config.env, and installs the required core package (with dual mode support if selected).</string>
+    <string name="setup_step2_desc">This step automatically downloads Python, Git, and system libraries inside Termux, clones the plain-ub repository, generates the config.env, and installs all required packages using the Termux-specific script.</string>
+
+    <!-- Paste Env -->
+    <string name="btn_paste_env">📋 Paste .env</string>
+    <string name="btn_parse_fill">Parse \u0026 Fill</string>
+    <string name="hint_env_paste">Paste your .env file contents here…\nSupports KEY=VALUE and export KEY=VALUE</string>
+    <string name="divider_or_manual">— or fill manually —</string>
+    <string name="env_parsed">✓ Parsed %d variables</string>
+
+    <!-- AI Diagnosis -->
+    <string name="btn_diagnose">🤖 Diagnose Error</string>
+    <string name="ai_diagnosis_header">AI Diagnosis</string>
+    <string name="ai_analyzing">Analyzing error with Gemini…</string>
+    <string name="ai_no_key">Set Gemini API Key in Configuration</string>
+    <string name="ai_no_error">No recent error to diagnose</string>
+
+    <!-- Custom Command -->
+    <string name="custom_cmd_header">⌨ Custom Command</string>
+    <string name="hint_custom_cmd">Enter shell command…</string>
+    <string name="btn_send_cmd">Send to Termux</string>
+    <string name="custom_cmd_helper">Run any command in Termux\'s shell</string>
 </resources>
